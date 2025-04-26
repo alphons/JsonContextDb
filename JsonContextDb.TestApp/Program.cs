@@ -7,32 +7,50 @@ var context = new  JsonContext(Path.Combine(AppContext.BaseDirectory, "Data"));
 var users = context.Set<User>();
 var vsers = context.Set<Vser>();
 
-var sw = Stopwatch.StartNew();
-
-for (int i = 0; i < 1000; i++)
+if (!users.Any())
 {
-	users.Add(new User
+
+	for (int i = 1; i <= 100000; i++)
 	{
-		Name = $"annet {i}"
-	});
-	vsers.Add(new Vser
-	{
-		Name = $"alphons {i}"
-	});
+		users.Add(new User
+		{
+			Name = $"annet {i}"
+		});
+		vsers.Add(new Vser
+		{
+			Name = $"alphons {i}"
+		});
+	}
+	await context.SaveChangesAsync();
 }
 
+var sw = Stopwatch.StartNew();
 
-await Task.Delay(1000);
+var user = users.FirstOrDefault(x => x.Name.Contains("99998"));
 
+if (user != null)
+	Console.WriteLine($"{user.Name} - {user.Id} {sw.ElapsedMilliseconds} mS");
+else
+	Console.WriteLine("not found");
 
-await context.SaveChangesAsync();
+sw = Stopwatch.StartNew();
 
-var us = context.Set<User>();
+user = users.FirstOrDefault(x => x.Name.Contains("Tester"));
 
-var u = us.FirstOrDefault(x => x.Name.Contains("123"));
+if (user != null)
+	Console.WriteLine($"{user.Name} - {user.Id} {sw.ElapsedMilliseconds} mS");
+else
+	Console.WriteLine("not found");
 
+if(user != null)
+	user.Name = "Tester 1";
 
-Console.WriteLine(u.Name + " " + u.Id + " " + sw.ElapsedMilliseconds + "mS");
+sw = Stopwatch.StartNew();
+
+var count = await context.SaveChangesAsync();
+
+Console.WriteLine($"Count:{count} {sw.ElapsedMilliseconds} mS");
+
 Console.ReadLine();
 
 class User
