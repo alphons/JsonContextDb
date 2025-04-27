@@ -42,6 +42,7 @@ public class JsonContext(string? dataDirectory, JsonContextOptions? options = nu
 
 	public enum ActionType
 	{
+		Unknown,
 		Add,
 		Update,
 		Remove
@@ -329,7 +330,7 @@ public class JsonContext(string? dataDirectory, JsonContextOptions? options = nu
 
 		lock (lockObject)
 		{
-			changes.Add((typeof(MetaData), new MetaData(), ActionType.Update));
+			changes.Add((typeof(MetaData), new MetaData(), ActionType.Unknown));
 
 			entityListsBackup = entityLists.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
 			modifiedTypes = [.. changes.Select(c => c.Type)];
@@ -368,7 +369,8 @@ public class JsonContext(string? dataDirectory, JsonContextOptions? options = nu
 						snapshots[change.Entity] = ComputeSHA256Hash(change.Entity, jsonContextOptions.SerializerOptions);
 
 						//entities.Add(change.Entity); // DONT
-						affectedEntities++;
+						if (typeof(MetaData) != change.Entity.GetType())
+							affectedEntities++;
 					}
 					else if (change.Action == ActionType.Update)
 					{
@@ -378,7 +380,8 @@ public class JsonContext(string? dataDirectory, JsonContextOptions? options = nu
 						{
 							entities.Remove(existing);
 							entities.Add(change.Entity);
-							affectedEntities++;
+							if (typeof(MetaData) != change.Entity.GetType())
+								affectedEntities++;
 						}
 					}
 					else if (change.Action == ActionType.Remove)
