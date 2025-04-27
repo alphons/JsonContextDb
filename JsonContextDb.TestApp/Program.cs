@@ -51,7 +51,7 @@ Debug.Assert(count1 == 1);
 
 Debug.Assert(newUser.Id != 0);
 
-//var user = users.FirstOrDefault(x => x.Name.Contains("99998"));
+var user = await users.FirstOrDefaultAsync(x => x.Name.Contains("1"));
 
 //Debug.Assert(user != null);
 

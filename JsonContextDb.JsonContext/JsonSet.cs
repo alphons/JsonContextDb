@@ -26,4 +26,29 @@ public class JsonSet<T>(JsonContext context) : IQueryable<T>, IQueryable, IEnume
 	public void RemoveRange(IEnumerable<T> entities) => context.RemoveRange(entities);
 	public IEnumerator<T> GetEnumerator() => GetQueryable().GetEnumerator();
 	IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+	/// <summary>
+	/// Asynchronously retrieves the first entity that matches the specified predicate, or the first entity if no predicate is provided.
+	/// Returns null if no entity is found.
+	/// </summary>
+	/// <param name="predicate">An optional expression to filter entities.</param>
+	/// <returns>A task representing the asynchronous operation, returning the first matching entity or null.</returns>
+	public Task<T?> FirstOrDefaultAsync(Expression<Func<T, bool>>? predicate = null)
+	{
+		var queryable = GetQueryable();
+		var result = predicate != null
+			? queryable.FirstOrDefault(predicate)
+			: queryable.FirstOrDefault();
+		return Task.FromResult(result);
+	}
+
+	/// <summary>
+	/// Asynchronously retrieves all entities as a list.
+	/// </summary>
+	/// <returns>A task representing the asynchronous operation, returning a list of all entities.</returns>
+	public Task<List<T>> ToListAsync()
+	{
+		var result = GetQueryable().ToList();
+		return Task.FromResult(result);
+	}
 }
