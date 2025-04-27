@@ -1,6 +1,5 @@
 ﻿using System.Collections;
-using System.Collections.Concurrent;
-using System.Linq.Expressions;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
 
@@ -18,19 +17,16 @@ namespace JsonContextDb.JsonContext;
 /// and <see cref="SaveChangesAsync"/> for persisting changes. Entities must have an integer <c>Id</c> property.
 /// Copyright (c) 2025 Alphons van der Heijden. All rights reserved.
 /// </remarks>
-public class JsonContext(string? dataDirectory, IFileStorage? fileStorage = null, JsonContextOptions? options = null)
+public class JsonContext(string? dataDirectory, JsonContextOptions? options = null)
 {
 	// Directory where JSON files are stored, required and validated.
 	private readonly string dataDirectory = dataDirectory ?? throw new ArgumentNullException(nameof(dataDirectory));
-
-	// File storage implementation, abstracted via IFileStorage for testability and flexibility.
-	private readonly IFileStorage fileStorage = fileStorage ?? new FileSystemStorage();
 
 	// Configuration options for serialization and file naming.
 	private readonly JsonContextOptions jsonContextOptions = options ?? new JsonContextOptions();
 
 	// In-memory storage of entity lists, keyed by entity type.
-	public readonly ConcurrentDictionary<Type, IList> entityLists = [];
+	private readonly Dictionary<Type, IList> entityLists = [];
 
 	// Tracks pending changes (add, update, remove) for SaveChangesAsync.
 	private readonly List<(Type Type, object Entity, ActionType Action)> changes = [];
@@ -39,7 +35,7 @@ public class JsonContext(string? dataDirectory, IFileStorage? fileStorage = null
 	private readonly Dictionary<object, byte[]> snapshots = [];
 
 	// Synchronization object for thread-safe operations.
-	public readonly object lockObject = new();
+	private readonly object lockObject = new();
 
 	// Cache of compiled ID accessors for entities, improving performance.
 	private static readonly Dictionary<Type, Func<object, int>> IdAccessors = [];
@@ -52,21 +48,72 @@ public class JsonContext(string? dataDirectory, IFileStorage? fileStorage = null
 	}
 
 	/// <summary>
+	/// Loads the list of entities of type <typeparamref name="T"/> from the corresponding JSON file.
+	/// </summary>
+	/// <typeparam name="T">The type of entity, which must be a class with an integer <c>Id</c> property.</typeparam>
+	/// <returns>A <see cref="List{T}"/> containing the deserialized entities, or an empty list if the file does not exist.</returns>
+	/// <remarks>
+	/// The JSON file is named using the <see cref="JsonContextOptions.FileNameFactory"/> and located in the directory
+	/// specified during construction. If the file does not exist or is corrupted, an empty list is returned or an exception
+	/// is thrown. This method uses synchronous file I/O for simplicity and is called by <see cref="Set{T}"/> to initialize
+	/// the in-memory entity list.
+	/// </remarks>
+	private List<T> LoadEntities<T>() where T : class
+	{
+		var jsonFilePath = Path.Combine(dataDirectory, jsonContextOptions.FileNameFactory(typeof(T)));
+
+		var fi = new FileInfo(jsonFilePath);
+
+		if (!fi.Exists)
+			return [];
+
+		try
+		{
+			using var stream = fi.OpenRead();
+
+			var entities = JsonSerializer.Deserialize<List<T>>(stream, jsonContextOptions.SerializerOptions) ?? [];
+
+			lock (lockObject)
+			{
+				foreach (var entity in entities)
+				{
+					snapshots[entity] = ComputeSHA256Hash(entity, jsonContextOptions.SerializerOptions);
+				}
+			}
+
+			return entities;
+		}
+		catch (JsonException ex)
+		{
+			throw new InvalidOperationException($"Failed to deserialize JSON file '{jsonFilePath}'.", ex);
+		}
+	}
+
+
+	/// <summary>
 	/// Computes a SHA-256 hash of the serialized entity for change tracking.
 	/// </summary>
 	/// <param name="entity">The entity to hash.</param>
 	/// <param name="options">The JSON serialization options.</param>
 	/// <returns>A 32-byte hash of the serialized entity.</returns>
 	private static byte[] ComputeSHA256Hash(object entity, JsonSerializerOptions options)
-	{
-		byte[] jsonBytes = JsonSerializer.SerializeToUtf8Bytes(entity, options);
-		return SHA256.HashData(jsonBytes); // 32 bytes output
-	}
+		=> SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(entity, options)); // 32 bytes output
 
 	// Retrieves a queryable set of entities of type T
-	public JsonSet<T> Set<T>() where T : class
+	public JsonSet<T> Set<T>() where T : class => new(this);
+
+	internal List<T> GetList<T>() where T : class
 	{
-		return new JsonSet<T>(this);
+		if (!entityLists.ContainsKey(typeof(T)))
+			entityLists[typeof(T)] = LoadEntities<T>();
+		return entityLists[typeof(T)] as List<T> ?? throw new Exception($"LoadEntities returned null on {nameof(T)}");
+	}
+
+	private List<object> GetList(Type type)
+	{
+		if (!entityLists.TryGetValue(type, out IList? list))
+			throw new Exception($"Collection {type} disapeared");
+		return [.. list.Cast<object>()];
 	}
 
 	/// <summary>
@@ -92,13 +139,6 @@ public class JsonContext(string? dataDirectory, IFileStorage? fileStorage = null
 		return accessor(entity);
 	}
 
-	public class MetaData
-	{
-		public int Id { get; set; } // Required for JsonContext
-		public string EntityType { get; set; } = string.Empty; // Name of the entity type (e.g., "Customer")
-		public int NextId { get; set; } // Next available ID for this type
-	}
-
 	/// <summary>
 	/// Retrieves or creates the <see cref="MetaData"/> for an entity type and returns the next available ID.
 	/// Updates the <see cref="MetaData"/> directly in the in-memory list.
@@ -110,34 +150,27 @@ public class JsonContext(string? dataDirectory, IFileStorage? fileStorage = null
 	/// </remarks>
 	private int GetNextIdForEntityType(Type t)
 	{
-		lock (lockObject)
+		var typeKey = t.Name;
+		var metaDataList = GetList<MetaData>();
+
+		var metaData = metaDataList.FirstOrDefault(m => m.EntityType == typeKey);
+
+		if (metaData == null)
 		{
-			var typeKey = t.Name;
-
-			if (!entityLists.TryGetValue(typeof(MetaData), out var list) || list is not List<MetaData> metaDataList)
+			metaData = new MetaData
 			{
-				metaDataList = LoadEntities<MetaData>();
-				entityLists[typeof(MetaData)] = metaDataList;
-			}
-
-			var metaData = metaDataList.FirstOrDefault(m => m.EntityType == typeKey);
-
-			if (metaData == null)
-			{
-				metaData = new MetaData
-				{
-					Id = metaDataList.Count > 0 ? metaDataList.Max(m => m.Id) + 1 : 1,
-					EntityType = typeKey,
-					NextId = 1
-				};
-				metaDataList.Add(metaData);
-			}
-
-			int nextId = metaData.NextId;
-			metaData.NextId++;
-
-			return nextId;
+				Id = metaDataList.Count > 0 ? metaDataList.Max(m => m.Id) + 1 : 1,
+				EntityType = typeKey,
+				NextId = 1
+			};
+			metaDataList.Add(metaData);
 		}
+
+		int nextId = metaData.NextId;
+		metaData.NextId++;
+
+		return nextId;
+
 	}
 
 	private static void SetId(object entity, int id)
@@ -162,13 +195,8 @@ public class JsonContext(string? dataDirectory, IFileStorage? fileStorage = null
 		ArgumentNullException.ThrowIfNull(entity);
 		lock (lockObject)
 		{
-			// Add to entityLists immediately
-			if (!entityLists.TryGetValue(typeof(T), out var list) || list is not List<T> typedList)
-			{
-				typedList = [];
-				entityLists[typeof(T)] = typedList;
-			}
-			typedList.Add(entity);
+			var list = GetList<T>();
+			list.Add(entity);
 
 			changes.Add((typeof(T), entity, ActionType.Add));
 			snapshots[entity] = ComputeSHA256Hash(entity, jsonContextOptions.SerializerOptions);
@@ -185,16 +213,12 @@ public class JsonContext(string? dataDirectory, IFileStorage? fileStorage = null
 		ArgumentNullException.ThrowIfNull(entities);
 		lock (lockObject)
 		{
-			if (!entityLists.TryGetValue(typeof(T), out var list) || list is not List<T> typedList)
-			{
-				typedList = [];
-				entityLists[typeof(T)] = typedList;
-			}
+			var list = GetList<T>();
 
 			foreach (var entity in entities)
 			{
 				ArgumentNullException.ThrowIfNull(entity);
-				typedList.Add(entity);
+				list.Add(entity);
 				changes.Add((typeof(T), entity, ActionType.Add));
 				snapshots[entity] = ComputeSHA256Hash(entity, jsonContextOptions.SerializerOptions);
 			}
@@ -297,8 +321,8 @@ public class JsonContext(string? dataDirectory, IFileStorage? fileStorage = null
 	/// </remarks>
 	public async Task<int> SaveChangesAsync()
 	{
-		Dictionary<Type, (string FilePath, string Json)> filesToWrite;
-		int affectedEntities;
+		Dictionary<Type, (string FilePath, string Json)> filesToWrite = [];
+		int affectedEntities = 0;
 		Dictionary<Type, IList> entityListsBackup;
 		HashSet<Type> modifiedTypes;
 		List<(Type Type, object Entity, ActionType Action)> changesBackup;
@@ -307,8 +331,6 @@ public class JsonContext(string? dataDirectory, IFileStorage? fileStorage = null
 		{
 			changes.Add((typeof(MetaData), new MetaData(), ActionType.Update));
 
-			affectedEntities = 0;
-			filesToWrite = [];
 			entityListsBackup = entityLists.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
 			modifiedTypes = [.. changes.Select(c => c.Type)];
 			changesBackup = [.. changes];
@@ -316,7 +338,7 @@ public class JsonContext(string? dataDirectory, IFileStorage? fileStorage = null
 			foreach (var kvp in entityLists)
 			{
 				var type = kvp.Key;
-				var entities = kvp.Value.Cast<object>().ToList();
+				var entities = kvp.Value;
 				foreach (var entity in entities)
 				{
 					if (snapshots.TryGetValue(entity, out var snapshot))
@@ -335,12 +357,7 @@ public class JsonContext(string? dataDirectory, IFileStorage? fileStorage = null
 			foreach (var group in changes.GroupBy(c => c.Type))
 			{
 				var type = group.Key;
-				if (!entityLists.TryGetValue(type, out var list))
-				{
-					list = new List<object>();
-					entityLists[type] = list;
-				}
-				var entities = list.Cast<object>().ToList();
+				var entities = GetList(type);
 
 				foreach (var change in group)
 				{
@@ -348,7 +365,9 @@ public class JsonContext(string? dataDirectory, IFileStorage? fileStorage = null
 					{
 						SetId(change.Entity, GetNextIdForEntityType(type));
 
-						//entities.Add(change.Entity);
+						snapshots[change.Entity] = ComputeSHA256Hash(change.Entity, jsonContextOptions.SerializerOptions);
+
+						//entities.Add(change.Entity); // DONT
 						affectedEntities++;
 					}
 					else if (change.Action == ActionType.Update)
@@ -370,7 +389,6 @@ public class JsonContext(string? dataDirectory, IFileStorage? fileStorage = null
 						}
 					}
 				}
-				entityLists[type] = entities;
 
 				if (modifiedTypes.Contains(type))
 				{
@@ -386,13 +404,13 @@ public class JsonContext(string? dataDirectory, IFileStorage? fileStorage = null
 			foreach (var (filePath, json) in filesToWrite.Values)
 			{
 				var tempFilePath = filePath + ".tmp";
-				await fileStorage.WriteTextAsync(tempFilePath, json);
+				await File.WriteAllTextAsync(tempFilePath, json);
 				File.Move(tempFilePath, filePath, overwrite: true);
 			}
+			filesToWrite.Clear();
+			filesToWrite.TrimExcess();
 			changes.Clear();
 			changes.TrimExcess();
-			snapshots.Clear();
-			snapshots.TrimExcess();
 		}
 		catch (Exception ex)
 		{
@@ -408,87 +426,9 @@ public class JsonContext(string? dataDirectory, IFileStorage? fileStorage = null
 			throw new InvalidOperationException("Failed to save changes. Changes rolled back, pending changes preserved.", ex);
 		}
 
+		Debug.WriteLine($"AffectedEntities:{affectedEntities}");
 		return affectedEntities;
 	}
-
-	/// <summary>
-	/// Loads the list of entities of type <typeparamref name="T"/> from the corresponding JSON file.
-	/// </summary>
-	/// <typeparam name="T">The type of entity, which must be a class with an integer <c>Id</c> property.</typeparam>
-	/// <returns>A <see cref="List{T}"/> containing the deserialized entities, or an empty list if the file does not exist.</returns>
-	/// <remarks>
-	/// The JSON file is named using the <see cref="JsonContextOptions.FileNameFactory"/> and located in the directory
-	/// specified during construction. If the file does not exist or is corrupted, an empty list is returned or an exception
-	/// is thrown. This method uses synchronous file I/O for simplicity and is called by <see cref="Set{T}"/> to initialize
-	/// the in-memory entity list.
-	/// </remarks>
-	public List<T> LoadEntities<T>() where T : class
-	{
-		var jsonFilePath = Path.Combine(dataDirectory, jsonContextOptions.FileNameFactory(typeof(T)));
-		if (!fileStorage.Exists(jsonFilePath))
-		{
-			return [];
-		}
-
-		try
-		{
-			var json = fileStorage.ReadText(jsonFilePath);
-			var entities = JsonSerializer.Deserialize<List<T>>(json, jsonContextOptions.SerializerOptions) ?? [];
-
-			lock (lockObject)
-			{
-				foreach (var entity in entities)
-				{
-					snapshots[entity] = ComputeSHA256Hash(entity, jsonContextOptions.SerializerOptions);
-				}
-			}
-
-			return entities;
-		}
-		catch (JsonException ex)
-		{
-			throw new InvalidOperationException($"Failed to deserialize JSON file '{jsonFilePath}'.", ex);
-		}
-	}
-
-	
 }
 
-/// <summary>
-/// A queryable collection of entities that supports querying, adding, updating, and removing entities
-/// in a JSON-based data context.
-/// </summary>
-/// <typeparam name="T">The type of entity, which must be a class with an integer <c>Id</c> property.</typeparam>
-public class JsonSet<T>(JsonContext context) : IQueryable<T>, IQueryable, IEnumerable<T>, IEnumerable where T : class
-{
-	// Reference to the parent JsonContext for operations.
-	private readonly JsonContext context = context ?? throw new ArgumentNullException(nameof(context));
 
-	// Queryable entity collection for LINQ operations.
-	private IQueryable<T> GetQueryable()
-	{
-		lock (context.lockObject)
-		{
-			if (!context.entityLists.TryGetValue(typeof(T), out var list) || list is not List<T> typedList)
-			{
-				typedList = context.LoadEntities<T>();
-				context.entityLists[typeof(T)] = typedList;
-			}
-			return typedList.AsQueryable();
-		}
-	}
-
-	public Type ElementType => GetQueryable().ElementType;
-	public Expression Expression => GetQueryable().Expression;
-	public IQueryProvider Provider => GetQueryable().Provider;
-
-	public void Add(T entity) => context.Add(entity);
-	public void AddRange(IEnumerable<T> entities) => context.AddRange(entities);
-	public void Update(T entity) => context.Update(entity);
-	public void UpdateRange(IEnumerable<T> entities) => context.UpdateRange(entities);
-	public void Remove(T entity) => context.Remove(entity);
-	public void RemoveRange(IEnumerable<T> entities) => context.RemoveRange(entities);
-
-	public IEnumerator<T> GetEnumerator() => GetQueryable().GetEnumerator();
-	IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
-}

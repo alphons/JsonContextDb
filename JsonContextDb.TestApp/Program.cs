@@ -5,26 +5,41 @@ using System.Diagnostics;
 var context = new  JsonContext(Path.Combine(AppContext.BaseDirectory, "Data"));
 
 var users = context.Set<User>();
-var vsers = context.Set<Vser>();
+//var vsers = context.Set<Vser>();
 
 if (!users.Any())
 {
 
-	for (int i = 1; i <= 100000; i++)
+	for (int i = 1; i <= 5; i++)
 	{
 		users.Add(new User
 		{
 			Name = $"annet {i}"
 		});
-		vsers.Add(new Vser
-		{
-			Name = $"alphons {i}"
-		});
+		//vsers.Add(new Vser
+		//{
+		//	Name = $"alphons {i}"
+		//});
 	}
-	await context.SaveChangesAsync();
+	var cnt = await context.SaveChangesAsync();
+
+	Console.WriteLine($"Count:{cnt}");
 }
 
 var sw = Stopwatch.StartNew();
+
+var newUser = new User
+{
+	Name = "Daar gaat ie"
+};
+
+users.Add(newUser);
+
+Console.WriteLine($"Id:{newUser.Id}");
+
+var count1 = await context.SaveChangesAsync();
+
+Console.WriteLine($"Count:{count1} Id:{newUser.Id}");
 
 var user = users.FirstOrDefault(x => x.Name.Contains("99998"));
 
