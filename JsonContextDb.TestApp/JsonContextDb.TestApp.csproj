@@ -8,6 +8,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="8.0.15" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\JsonContextDb.JsonContext\JsonContextDb.JsonContext.csproj" />
   </ItemGroup>
 

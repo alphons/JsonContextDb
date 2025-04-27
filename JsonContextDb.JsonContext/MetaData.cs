@@ -1,5 +1,4 @@
-﻿
-namespace JsonContextDb.JsonContext;
+﻿namespace JsonContextDb.JsonContext;
 
 internal class MetaData
 {

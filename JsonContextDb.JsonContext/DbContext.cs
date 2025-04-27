@@ -17,13 +17,13 @@ namespace JsonContextDb.JsonContext;
 /// and <see cref="SaveChangesAsync"/> for persisting changes. Entities must have an integer <c>Id</c> property.
 /// Copyright (c) 2025 Alphons van der Heijden. All rights reserved.
 /// </remarks>
-public class JsonContext(string? dataDirectory, JsonContextOptions? options = null)
+public class DbContext(string? dataDirectory, DbContextOptions? options = null)
 {
 	// Directory where JSON files are stored, required and validated.
 	private readonly string dataDirectory = dataDirectory ?? throw new ArgumentNullException(nameof(dataDirectory));
 
 	// Configuration options for serialization and file naming.
-	private readonly JsonContextOptions jsonContextOptions = options ?? new JsonContextOptions();
+	private readonly DbContextOptions jsonContextOptions = options ?? new DbContextOptions();
 
 	// In-memory storage of entity lists, keyed by entity type.
 	private readonly Dictionary<Type, IList> entityLists = [];
@@ -54,7 +54,7 @@ public class JsonContext(string? dataDirectory, JsonContextOptions? options = nu
 	/// <typeparam name="T">The type of entity, which must be a class with an integer <c>Id</c> property.</typeparam>
 	/// <returns>A <see cref="List{T}"/> containing the deserialized entities, or an empty list if the file does not exist.</returns>
 	/// <remarks>
-	/// The JSON file is named using the <see cref="JsonContextOptions.FileNameFactory"/> and located in the directory
+	/// The JSON file is named using the <see cref="DbContextOptions.FileNameFactory"/> and located in the directory
 	/// specified during construction. If the file does not exist or is corrupted, an empty list is returned or an exception
 	/// is thrown. This method uses synchronous file I/O for simplicity and is called by <see cref="Set{T}"/> to initialize
 	/// the in-memory entity list.
@@ -101,7 +101,7 @@ public class JsonContext(string? dataDirectory, JsonContextOptions? options = nu
 		=> SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(entity, options)); // 32 bytes output
 
 	// Retrieves a queryable set of entities of type T
-	public JsonSet<T> Set<T>() where T : class => new(this);
+	public DbSet<T> Set<T>() where T : class => new(this);
 
 	internal List<T> GetList<T>() where T : class
 	{
@@ -110,11 +110,11 @@ public class JsonContext(string? dataDirectory, JsonContextOptions? options = nu
 		return entityLists[typeof(T)] as List<T> ?? throw new Exception($"LoadEntities returned null on {nameof(T)}");
 	}
 
-	private List<object> GetList(Type type)
+	private IList GetList(Type type)
 	{
 		if (!entityLists.TryGetValue(type, out IList? list))
 			throw new Exception($"Collection {type} disapeared");
-		return [.. list.Cast<object>()];
+		return list;
 	}
 
 	/// <summary>
@@ -196,8 +196,8 @@ public class JsonContext(string? dataDirectory, JsonContextOptions? options = nu
 		ArgumentNullException.ThrowIfNull(entity);
 		lock (lockObject)
 		{
-			var list = GetList<T>();
-			list.Add(entity);
+			//var list = GetList<T>();
+			//list.Add(entity);
 
 			changes.Add((typeof(T), entity, ActionType.Add));
 			snapshots[entity] = ComputeSHA256Hash(entity, jsonContextOptions.SerializerOptions);
@@ -214,12 +214,12 @@ public class JsonContext(string? dataDirectory, JsonContextOptions? options = nu
 		ArgumentNullException.ThrowIfNull(entities);
 		lock (lockObject)
 		{
-			var list = GetList<T>();
+			//var list = GetList<T>();
 
 			foreach (var entity in entities)
 			{
 				ArgumentNullException.ThrowIfNull(entity);
-				list.Add(entity);
+				//list.Add(entity);
 				changes.Add((typeof(T), entity, ActionType.Add));
 				snapshots[entity] = ComputeSHA256Hash(entity, jsonContextOptions.SerializerOptions);
 			}
@@ -368,14 +368,15 @@ public class JsonContext(string? dataDirectory, JsonContextOptions? options = nu
 
 						snapshots[change.Entity] = ComputeSHA256Hash(change.Entity, jsonContextOptions.SerializerOptions);
 
-						//entities.Add(change.Entity); // DONT
+						entities.Add(change.Entity);
+
 						if (typeof(MetaData) != change.Entity.GetType())
 							affectedEntities++;
 					}
 					else if (change.Action == ActionType.Update)
 					{
 						var id = GetId(change.Entity);
-						var existing = entities.FirstOrDefault(e => GetId(e) == id);
+						var existing = entities.Cast<object>().FirstOrDefault(e => GetId(e) == id);
 						if (existing != null)
 						{
 							entities.Remove(existing);
@@ -386,10 +387,8 @@ public class JsonContext(string? dataDirectory, JsonContextOptions? options = nu
 					}
 					else if (change.Action == ActionType.Remove)
 					{
-						if (entities.Remove(change.Entity))
-						{
-							affectedEntities++;
-						}
+						entities.Remove(change.Entity);
+						affectedEntities++;
 					}
 				}
 
